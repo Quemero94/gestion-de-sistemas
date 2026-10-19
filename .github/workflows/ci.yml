@@ -1,0 +1,102 @@
+# =============================================================================
+# CI - Tests Playwright
+# Workflow de Integración Continua que funciona como QUALITY GATE:
+# cada Pull Request contra main corre la suite completa de Playwright y
+# reporta el resultado como "status check" sobre el PR. Una branch protection
+# rule en main exige que este check pase antes de habilitar el merge.
+# =============================================================================
+
+# Nombre del workflow. Es el que aparece en la pestaña "Actions" y en el badge.
+name: CI
+
+# -----------------------------------------------------------------------------
+# TRIGGERS (eventos de disparo)
+# -----------------------------------------------------------------------------
+on:
+  # Evento principal: se ejecuta al abrir un PR contra main y en cada push
+  # nuevo a la rama de ese PR (synchronize). Es lo que convierte al workflow
+  # en un quality gate previo al merge.
+  pull_request:
+    branches: [main]
+
+  # También corre cuando algo se integra a main (por ejemplo, al mergear el PR).
+  # Así el badge del README refleja el estado real de la rama principal.
+  push:
+    branches: [main]
+
+  # Permite lanzar el workflow a mano desde la pestaña Actions (botón "Run workflow").
+  workflow_dispatch:
+
+# Si llega un push nuevo al mismo PR mientras otra ejecución sigue corriendo,
+# cancela la anterior para no gastar minutos en un commit que ya quedó viejo.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# -----------------------------------------------------------------------------
+# JOBS: un workflow tiene uno o más jobs; cada job corre en su propio runner.
+# -----------------------------------------------------------------------------
+jobs:
+  test:
+    # Nombre del job. Es el nombre del STATUS CHECK que se ve en el PR y el que
+    # se selecciona en la branch protection rule como "required".
+    name: Tests Playwright
+
+    # RUNNER: máquina virtual Ubuntu limpia, hospedada por GitHub.
+    runs-on: ubuntu-latest
+
+    # Corta el job si se cuelga, para no consumir minutos de más.
+    timeout-minutes: 15
+
+    # -------------------------------------------------------------------------
+    # STEPS: se ejecutan en orden dentro del mismo runner. Cada step es un
+    # comando de shell (run) o una ACTION reutilizable del Marketplace (uses).
+    # -------------------------------------------------------------------------
+    steps:
+      # 1) Descarga el código del repositorio (el commit del PR) en el runner.
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      # 2) Instala Node.js en la versión indicada.
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # 3) CACHE de dependencias npm. La clave depende del hash de
+      #    package-lock.json: si el lock no cambió, se restaura ~/.npm desde la
+      #    cache y la instalación es mucho más rápida.
+      - name: Cache de dependencias npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-
+
+      # 4) Instalación estricta y reproducible de dependencias a partir de
+      #    package-lock.json (npm ci falla si el lock y package.json no coinciden).
+      - name: Instalar dependencias
+        run: npm ci
+
+      # 5) Instala los navegadores de Playwright y las librerías del sistema
+      #    operativo que necesitan (--with-deps). Solo Chromium para que sea más rápido.
+      - name: Instalar navegadores de Playwright
+        run: npx playwright install --with-deps chromium
+
+      # 6) Ejecuta la suite de tests en modo headless (sin interfaz gráfica).
+      #    Si algún test falla, el step termina con error, el job queda en rojo
+      #    y el status check del PR se marca como fallido.
+      - name: Ejecutar tests de Playwright
+        run: npx playwright test
+
+      # 7) Publica el reporte HTML de Playwright como ARTIFACT del workflow.
+      #    "if: always()" hace que se suba aunque los tests hayan fallado,
+      #    que es justamente cuando más sirve para ver qué se rompió.
+      - name: Publicar reporte de Playwright
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 30
